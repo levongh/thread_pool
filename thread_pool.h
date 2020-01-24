@@ -9,9 +9,10 @@
 
 #include <mutex>
 #include <thread>
-#include <conditional_variable>
+#include <condition_variable>
 
 #include <type_traits>
+#include <future>
 #include <functional>
 
 #include <queue>
@@ -36,17 +37,17 @@ public:
 private:
     bool m_stop;
 
-    std::conditional_variable m_condition;
+    std::condition_variable m_condition;
 
     std::mutex m_mutex;
 
-    std::queue<typename Task> m_tasks;
+    std::queue<Task> m_tasks;
 
     std::vector<std::thread> m_threads;
 };
 
 template <typename Task>
-thread_pool::thread_pool(unsigned thread_count)
+thread_pool<Task>::thread_pool(unsigned thread_count)
     : m_stop{false}
 {
     if (thread_count == 0) {
@@ -55,16 +56,18 @@ thread_pool::thread_pool(unsigned thread_count)
     for (unsigned i = 0; i < thread_count; ++i) {
         m_threads.emplace_back([this] {
             while(true) {
-                std::unique_lock<std::mutex> lock(m_mutex);
-                while (!stop && m_tasks.empty()) {
-                    m_condition.wait(lock);
+                Task tsk;
+                {
+                    std::unique_lock<std::mutex> lock(m_mutex);
+                    while (!m_stop && m_tasks.empty()) {
+                        m_condition.wait(lock);
+                    }
+                    if (m_stop && m_tasks.empty()) {
+                        return;
+                    }
+                    tsk = std::move(m_tasks.front());
+                    m_tasks.pop();
                 }
-                if (stop && m_tasks.empty()) {
-                    return;
-                }
-                Task tsk = std::move(m_tasks.front());
-                m_tasks.pop();
-                lock.unlock();
                 tsk();
             }
         });
@@ -72,7 +75,7 @@ thread_pool::thread_pool(unsigned thread_count)
 }
 
 template <typename Task>
-thread_pool::~thread_pool()
+thread_pool<Task>::~thread_pool()
 {
     {
         std::unique_lock<std::mutex> lock(m_mutex);
@@ -87,19 +90,28 @@ thread_pool::~thread_pool()
 
 template <typename Task>
 template <class... Args>
-auto thread_pool::shedule(Task&& function, Args&&... Args) -> std::future<typename std::result_of<Task(Args...)>::type>
+auto thread_pool<Task>::shedule(Task&& function, Args&&... args) -> std::future<typename std::result_of<Task(Args...)>::type>
 {
     std::lock_guard<std::mutex> lock(m_mutex);
-    if(stop) {
+    if(m_stop) {
         throw std::runtime_error("shedule on destroyed sheduler");
     }
     using result_type = typename std::result_of<Task(Args...)>::type;
 
-    std::packaged_task<result_type()> task(std::bind(std::forward<Task>(function), std::forward<Args>(args)...));
+    auto task = std::make_shared< std::packaged_task<result_type()> >(
+            std::bind(std::forward<Task>(function), std::forward<Args>(args)...)
+         );
 
-    std::future<result_type> result(task.get_future());
-    m_tasks.push(std::move(task));
-    conditional_variable.notify_one();
+    std::future<result_type> result(task->get_future());
+    {
+        std::unique_lock<std::mutex> lock(m_mutex);
+
+        if(m_stop)
+            throw std::runtime_error("enqueue on stopped ThreadPool");
+
+        m_tasks.emplace([task](){ (*task)(); });
+    }
+    m_condition.notify_one();
 
     return result;
 }
