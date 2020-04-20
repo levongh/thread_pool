@@ -19,7 +19,6 @@
 #include <vector>
 
 
-template <typename Task>
 class thread_pool
 {
 public:
@@ -31,7 +30,7 @@ public:
 
 public:
     /// @brief function to shedule tasks
-    template <class... Args>
+    template <class Task, class... Args>
     auto shedule(Task&& function, Args&&... args) -> std::future<typename std::result_of<Task(Args...)>::type>;
 
 private:
@@ -41,13 +40,12 @@ private:
 
     std::mutex m_mutex;
 
-    std::queue<Task> m_tasks;
+    std::queue<std::function<void()> > m_tasks;
 
     std::vector<std::thread> m_threads;
 };
 
-template <typename Task>
-thread_pool<Task>::thread_pool(unsigned thread_count)
+thread_pool::thread_pool(unsigned thread_count)
     : m_stop{false}
 {
     if (thread_count == 0) {
@@ -56,7 +54,7 @@ thread_pool<Task>::thread_pool(unsigned thread_count)
     for (unsigned i = 0; i < thread_count; ++i) {
         m_threads.emplace_back([this] {
             while(true) {
-                Task tsk;
+                std::function<void()> tsk;
                 {
                     std::unique_lock<std::mutex> lock(m_mutex);
                     while (!m_stop && m_tasks.empty()) {
@@ -74,8 +72,7 @@ thread_pool<Task>::thread_pool(unsigned thread_count)
     }
 }
 
-template <typename Task>
-thread_pool<Task>::~thread_pool()
+thread_pool::~thread_pool()
 {
     {
         std::unique_lock<std::mutex> lock(m_mutex);
@@ -88,15 +85,13 @@ thread_pool<Task>::~thread_pool()
     }
 }
 
-template <typename Task>
-template <class... Args>
-auto thread_pool<Task>::shedule(Task&& function, Args&&... args) -> std::future<typename std::result_of<Task(Args...)>::type>
+template <class Task, class... Args>
+auto thread_pool::shedule(Task&& function, Args&&... args) -> std::future<typename std::result_of<Task(Args...)>::type>
 {
-    std::lock_guard<std::mutex> lock(m_mutex);
     if(m_stop) {
         throw std::runtime_error("shedule on destroyed sheduler");
     }
-    using result_type = typename std::result_of<Task(Args...)>::type;
+    using result_type = decltype(function(args...));
 
     auto task = std::make_shared< std::packaged_task<result_type()> >(
             std::bind(std::forward<Task>(function), std::forward<Args>(args)...)
